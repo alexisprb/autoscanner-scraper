@@ -81,7 +81,7 @@ def scraper_leboncoin(recherche, scraper_key):
         lbc_api_url = "https://api.leboncoin.fr/api/adfinder/v1/search"
 
         # ScraperAPI avec proxy France, sans rendu JS
-       scraper_url = f"http://api.scraperapi.com/?api_key={scraper_key}&url={requests.utils.quote(lbc_api_url)}&country_code=fr&premium=true"
+        scraper_url = f"http://api.scraperapi.com/?api_key={scraper_key}&url={requests.utils.quote(lbc_api_url)}&country_code=fr"
 
         log(f"Envoi requete via ScraperAPI...")
 
