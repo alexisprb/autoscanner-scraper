@@ -1,4 +1,3 @@
-
 import os
 import time
 import random
@@ -15,15 +14,29 @@ def get_supabase():
     log(f"SUPABASE_URL: {url}")
     log(f"SUPABASE_KEY debut: {key[:20] if key else 'NON DEFINIE'}...")
     if not url or not key:
-        raise Exception("Variables SUPABASE_URL et SUPABASE_KEY manquantes dans Railway")
+        raise Exception("Variables manquantes dans Railway")
     return create_client(url, key)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "fr-FR,fr;q=0.9",
-    "Referer": "https://www.leboncoin.fr/",
-}
+def get_headers():
+    user_agents = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    ]
+    return {
+        "User-Agent": random.choice(user_agents),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Content-Type": "application/json",
+        "Referer": "https://www.leboncoin.fr/recherche?category=2",
+        "Origin": "https://www.leboncoin.fr",
+        "api_key": "ba0c2dad52b3ec",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
 
 def charger_recherches(sb):
     try:
@@ -35,32 +48,53 @@ def charger_recherches(sb):
 
 def scraper_leboncoin(recherche):
     try:
-        url = "https://api.leboncoin.fr/api/adfinder/v1/search"
+        session = requests.Session()
+
+        # Visite la page principale dabord pour avoir les cookies
+        session.get("https://www.leboncoin.fr/", headers=get_headers(), timeout=10)
+        time.sleep(random.uniform(1, 3))
+
+        # Construction des filtres
         filters = {"category": {"id": "2"}, "enums": {}, "location": {}}
         marque = recherche.get("marque", "")
         modele = recherche.get("modele", "")
+
         if marque:
             filters["enums"]["vehicle_brand"] = {"value": marque.lower()}
         if modele:
             filters["enums"]["vehicle_model"] = {"value": modele.lower()}
         if recherche.get("prix_max"):
-            filters["enums"]["price"] = {"max": str(recherche["prix_max"])}
+            filters["ranges"] = {"price": {"max": recherche["prix_max"]}}
         if recherche.get("km_max"):
-            filters["enums"]["mileage"] = {"max": str(recherche["km_max"])}
+            if "ranges" not in filters:
+                filters["ranges"] = {}
+            filters["ranges"]["mileage"] = {"max": recherche["km_max"]}
         if recherche.get("annee_min") or recherche.get("annee_max"):
-            filters["enums"]["regdate"] = {}
+            if "ranges" not in filters:
+                filters["ranges"] = {}
+            filters["ranges"]["regdate"] = {}
             if recherche.get("annee_min"):
-                filters["enums"]["regdate"]["min"] = str(recherche["annee_min"])
+                filters["ranges"]["regdate"]["min"] = recherche["annee_min"]
             if recherche.get("annee_max"):
-                filters["enums"]["regdate"]["max"] = str(recherche["annee_max"])
+                filters["ranges"]["regdate"]["max"] = recherche["annee_max"]
         carburant = recherche.get("carburant", "tous")
         if carburant and carburant != "tous":
             filters["enums"]["fuel"] = {"value": carburant.lower()}
 
-        payload = {"limit": 35, "offset": 0, "filters": filters, "sort_by": "time", "sort_order": "desc"}
-        response = requests.post(url, json=payload, headers=HEADERS, timeout=15)
+        payload = {
+            "limit": 35,
+            "offset": 0,
+            "filters": filters,
+            "sort_by": "time",
+            "sort_order": "desc",
+            "owner_type": "all"
+        }
+
+        url = "https://api.leboncoin.fr/api/adfinder/v1/search"
+        response = session.post(url, json=payload, headers=get_headers(), timeout=15)
         response.raise_for_status()
         data = response.json()
+
         annonces = data.get("ads", [])
         prix_list = []
         for annonce in annonces:
@@ -69,8 +103,13 @@ def scraper_leboncoin(recherche):
                 p = prix[0]
                 if isinstance(p, (int, float)) and 500 < p < 200000:
                     prix_list.append(p)
+
         log(f"LeBonCoin: {len(annonces)} annonces, {len(prix_list)} prix pour {recherche.get('nom')}")
         return prix_list
+
+    except requests.exceptions.HTTPError as e:
+        log(f"Erreur HTTP {e.response.status_code}: LeBonCoin bloque la requete")
+        return []
     except Exception as e:
         log(f"Erreur scraping: {e}")
         return []
@@ -122,7 +161,7 @@ def boucle_principale():
             succes = 0
             for recherche in recherches:
                 try:
-                    time.sleep(random.uniform(2, 5))
+                    time.sleep(random.uniform(3, 7))
                     prix_list = scraper_leboncoin(recherche)
                     if prix_list:
                         prix_moyen, nb = calculer_prix_moyen(prix_list)
