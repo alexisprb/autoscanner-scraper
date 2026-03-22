@@ -17,6 +17,12 @@ def get_supabase():
         raise Exception("Variables manquantes dans Railway")
     return create_client(url, key)
 
+def get_scraper_api_key():
+    key = os.environ.get("SCRAPER_API_KEY")
+    if not key:
+        raise Exception("Variable SCRAPER_API_KEY manquante dans Railway")
+    return key
+
 def charger_recherches(sb):
     try:
         result = sb.table("recherches").select("*").eq("actif", True).execute()
@@ -25,8 +31,7 @@ def charger_recherches(sb):
         log(f"Erreur chargement recherches: {e}")
         return []
 
-def scraper_leboncoin_mobile(recherche):
-    """Utilise l API mobile LeBonCoin - moins bloquee que l API web"""
+def scraper_leboncoin(recherche, scraper_key):
     try:
         marque = recherche.get("marque", "")
         modele = recherche.get("modele", "")
@@ -36,162 +41,89 @@ def scraper_leboncoin_mobile(recherche):
         annee_max = recherche.get("annee_max")
         carburant = recherche.get("carburant", "tous")
 
-        # Parametres de recherche style app mobile
-        params = {
-            "category": "2",
-            "limit": "100",
-            "sort_by": "time",
-            "sort_order": "desc",
-        }
-
-        if marque:
-            params["brand"] = marque
-        if modele:
-            params["model"] = modele
-        if prix_max:
-            params["price_max"] = str(prix_max)
-        if km_max:
-            params["mileage_max"] = str(km_max)
-        if annee_min:
-            params["regdate_min"] = str(annee_min)
-        if annee_max:
-            params["regdate_max"] = str(annee_max)
-        if carburant and carburant != "tous":
-            params["fuel"] = carburant
-
-        headers = {
-            "User-Agent": "LeBonCoin/6.0.0 (iPhone; iOS 17.0; Scale/3.00)",
-            "Accept": "application/json",
-            "Accept-Language": "fr-FR;q=1.0",
-            "api_key": "ba0c2dad52b3ec",
-            "Content-Type": "application/json",
-        }
-
-        url = "https://api.leboncoin.fr/api/adfinder/v1/search"
-
-        filters = {
-            "category": {"id": "2"},
-            "enums": {},
-            "ranges": {},
-            "location": {}
-        }
-
-        if marque:
-            filters["enums"]["vehicle_brand"] = {"value": marque.lower()}
-        if modele:
-            filters["enums"]["vehicle_model"] = {"value": modele.lower()}
-        if carburant and carburant != "tous":
-            filters["enums"]["fuel"] = {"value": carburant.lower()}
-        if prix_max:
-            filters["ranges"]["price"] = {"max": prix_max}
-        if km_max:
-            filters["ranges"]["mileage"] = {"max": km_max}
-        if annee_min or annee_max:
-            filters["ranges"]["regdate"] = {}
-            if annee_min:
-                filters["ranges"]["regdate"]["min"] = annee_min
-            if annee_max:
-                filters["ranges"]["regdate"]["max"] = annee_max
-
-        payload = {
-            "limit": 100,
-            "offset": 0,
-            "filters": filters,
-            "sort_by": "time",
-            "sort_order": "desc",
-            "owner_type": "all"
-        }
-
-        response = requests.post(url, json=payload, headers=headers, timeout=20)
-
-        if response.status_code == 403:
-            log(f"LeBonCoin bloque - tentative alternative...")
-            return scraper_leboncoin_alternatif(recherche)
-
-        response.raise_for_status()
-        data = response.json()
-        annonces = data.get("ads", [])
-        prix_list = []
-
-        for annonce in annonces:
-            prix = annonce.get("price", [])
-            if prix and isinstance(prix, list) and len(prix) > 0:
-                p = prix[0]
-                if isinstance(p, (int, float)) and 500 < p < 200000:
-                    prix_list.append(int(p))
-
-        log(f"LeBonCoin: {len(annonces)} annonces, {len(prix_list)} prix pour {recherche.get('nom')}")
-        return prix_list
-
-    except Exception as e:
-        log(f"Erreur scraping mobile: {e}")
-        return scraper_leboncoin_alternatif(recherche)
-
-def scraper_leboncoin_alternatif(recherche):
-    """Methode alternative via l URL de recherche classique"""
-    try:
-        marque = recherche.get("marque", "")
-        modele = recherche.get("modele", "")
-        prix_max = recherche.get("prix_max", "")
-        km_max = recherche.get("km_max", "")
-
-        # Construction URL de recherche
+        # Construction URL LeBonCoin
         query_parts = []
         if marque:
             query_parts.append(marque)
         if modele:
             query_parts.append(modele)
+        query = " ".join(query_parts)
 
-        query = "+".join(query_parts)
-        url = f"https://www.leboncoin.fr/recherche?category=2&text={query}"
-
+        url_lbc = f"https://www.leboncoin.fr/recherche?category=2&text={query.replace(' ', '+')}"
         if prix_max:
-            url += f"&price=min-{prix_max}"
+            url_lbc += f"&price=min-{prix_max}"
         if km_max:
-            url += f"&mileage=min-{km_max}"
+            url_lbc += f"&mileage=min-{km_max}"
+        if annee_min:
+            url_lbc += f"&regdate={annee_min}-max"
+        if annee_max:
+            url_lbc += f"&regdate=min-{annee_max}"
+        if carburant and carburant != "tous":
+            url_lbc += f"&fuel={carburant}"
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "fr-FR,fr;q=0.9",
+        log(f"Scraping: {url_lbc}")
+
+        # Utilise ScraperAPI pour contourner le blocage
+        scraper_url = "http://api.scraperapi.com"
+        params = {
+            "api_key": scraper_key,
+            "url": url_lbc,
+            "render": "true",
+            "country_code": "fr",
         }
 
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(scraper_url, params=params, timeout=60)
+        log(f"Statut ScraperAPI: {response.status_code}")
 
         if response.status_code != 200:
-            log(f"Methode alternative: statut {response.status_code}")
+            log(f"Erreur ScraperAPI: {response.status_code}")
             return []
 
-        # Extraction des prix depuis le HTML
         import re
         texte = response.text
         prix_list = []
 
-        # Cherche les patterns de prix dans le HTML
+        # Extraction des prix depuis le HTML LeBonCoin
         patterns = [
             r'"price":\[(\d+)\]',
             r'"price":(\d+)',
-            r'(\d{3,6})\s*€',
+            r'"Price":(\d+)',
+            r'data-qa-id="aditem_price"[^>]*>([0-9\s]+)',
+            r'(\d{3,6})\s*\u20ac',
             r'(\d{3,6})\s*&euro;',
+            r'"price_cents":(\d+)',
         ]
 
         for pattern in patterns:
             matches = re.findall(pattern, texte)
             for match in matches:
                 try:
-                    p = int(match)
+                    # Nettoie les espaces
+                    clean = str(match).replace(" ", "").replace("\u00a0", "")
+                    p = int(clean)
                     if 500 < p < 200000:
                         prix_list.append(p)
                 except:
                     pass
 
-        # Deduplique et limite
-        prix_list = list(set(prix_list))[:50]
-        log(f"Alternative: {len(prix_list)} prix trouves pour {recherche.get('nom')}")
+        # Cherche aussi dans le JSON embarque dans la page
+        json_pattern = r'"price":\[(\d+)\]'
+        json_matches = re.findall(json_pattern, texte)
+        for match in json_matches:
+            try:
+                p = int(match)
+                if 500 < p < 200000:
+                    prix_list.append(p)
+            except:
+                pass
+
+        # Deduplique
+        prix_list = list(set(prix_list))
+        log(f"LeBonCoin via ScraperAPI: {len(prix_list)} prix trouves pour {recherche.get('nom')}")
         return prix_list
 
     except Exception as e:
-        log(f"Erreur methode alternative: {e}")
+        log(f"Erreur scraping: {e}")
         return []
 
 def calculer_prix_moyen(prix_list):
@@ -229,6 +161,8 @@ def boucle_principale():
     log(f"Intervalle: toutes les {interval_heures} heures")
     sb = get_supabase()
     log("Connexion Supabase OK")
+    scraper_key = get_scraper_api_key()
+    log("Cle ScraperAPI OK")
     cycle = 0
     while True:
         cycle += 1
@@ -241,8 +175,8 @@ def boucle_principale():
             succes = 0
             for recherche in recherches:
                 try:
-                    time.sleep(random.uniform(3, 8))
-                    prix_list = scraper_leboncoin_mobile(recherche)
+                    time.sleep(random.uniform(2, 5))
+                    prix_list = scraper_leboncoin(recherche, scraper_key)
                     if prix_list:
                         prix_moyen, nb = calculer_prix_moyen(prix_list)
                         if prix_moyen and enregistrer_snapshot(sb, recherche, prix_moyen, nb):
