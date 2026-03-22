@@ -2,6 +2,8 @@ import os
 import time
 import random
 import requests
+import json
+import re
 from datetime import datetime
 from supabase import create_client
 
@@ -17,10 +19,10 @@ def get_supabase():
         raise Exception("Variables manquantes dans Railway")
     return create_client(url, key)
 
-def get_scraper_api_key():
+def get_scraper_key():
     key = os.environ.get("SCRAPER_API_KEY")
     if not key:
-        raise Exception("Variable SCRAPER_API_KEY manquante dans Railway")
+        raise Exception("SCRAPER_API_KEY manquante")
     return key
 
 def charger_recherches(sb):
@@ -41,86 +43,81 @@ def scraper_leboncoin(recherche, scraper_key):
         annee_max = recherche.get("annee_max")
         carburant = recherche.get("carburant", "tous")
 
-        # Construction URL LeBonCoin
-        query_parts = []
-        if marque:
-            query_parts.append(marque)
-        if modele:
-            query_parts.append(modele)
-        query = " ".join(query_parts)
-
-        url_lbc = f"https://www.leboncoin.fr/recherche?category=2&text={query.replace(' ', '+')}"
-        if prix_max:
-            url_lbc += f"&price=min-{prix_max}"
-        if km_max:
-            url_lbc += f"&mileage=min-{km_max}"
-        if annee_min:
-            url_lbc += f"&regdate={annee_min}-max"
-        if annee_max:
-            url_lbc += f"&regdate=min-{annee_max}"
-        if carburant and carburant != "tous":
-            url_lbc += f"&fuel={carburant}"
-
-        log(f"Scraping: {url_lbc}")
-
-        # Utilise ScraperAPI pour contourner le blocage
-        scraper_url = "http://api.scraperapi.com"
-        params = {
-            "api_key": scraper_key,
-            "url": url_lbc,
-            "render": "true",
-            "country_code": "fr",
+        # Construction payload API LeBonCoin
+        filters = {
+            "category": {"id": "2"},
+            "enums": {},
+            "ranges": {},
+            "location": {}
         }
 
-        response = requests.get(scraper_url, params=params, timeout=60)
-        log(f"Statut ScraperAPI: {response.status_code}")
+        if marque:
+            filters["enums"]["vehicle_brand"] = {"value": marque.lower()}
+        if modele:
+            filters["enums"]["vehicle_model"] = {"value": modele.lower()}
+        if carburant and carburant != "tous":
+            filters["enums"]["fuel"] = {"value": carburant.lower()}
+        if prix_max:
+            filters["ranges"]["price"] = {"max": int(prix_max)}
+        if km_max:
+            filters["ranges"]["mileage"] = {"max": int(km_max)}
+        if annee_min or annee_max:
+            filters["ranges"]["regdate"] = {}
+            if annee_min:
+                filters["ranges"]["regdate"]["min"] = int(annee_min)
+            if annee_max:
+                filters["ranges"]["regdate"]["max"] = int(annee_max)
 
-        if response.status_code != 200:
-            log(f"Erreur ScraperAPI: {response.status_code}")
-            return []
+        payload = {
+            "limit": 100,
+            "offset": 0,
+            "filters": filters,
+            "sort_by": "time",
+            "sort_order": "desc",
+            "owner_type": "all"
+        }
 
-        import re
-        texte = response.text
-        prix_list = []
+        # URL API LeBonCoin passee via ScraperAPI
+        lbc_api_url = "https://api.leboncoin.fr/api/adfinder/v1/search"
 
-        # Extraction des prix depuis le HTML LeBonCoin
-        patterns = [
-            r'"price":\[(\d+)\]',
-            r'"price":(\d+)',
-            r'"Price":(\d+)',
-            r'data-qa-id="aditem_price"[^>]*>([0-9\s]+)',
-            r'(\d{3,6})\s*\u20ac',
-            r'(\d{3,6})\s*&euro;',
-            r'"price_cents":(\d+)',
-        ]
+        # ScraperAPI avec proxy France, sans rendu JS
+        scraper_url = f"http://api.scraperapi.com/?api_key={scraper_key}&url={requests.utils.quote(lbc_api_url)}&country_code=fr"
 
-        for pattern in patterns:
-            matches = re.findall(pattern, texte)
-            for match in matches:
-                try:
-                    # Nettoie les espaces
-                    clean = str(match).replace(" ", "").replace("\u00a0", "")
-                    p = int(clean)
-                    if 500 < p < 200000:
-                        prix_list.append(p)
-                except:
-                    pass
+        log(f"Envoi requete via ScraperAPI...")
 
-        # Cherche aussi dans le JSON embarque dans la page
-        json_pattern = r'"price":\[(\d+)\]'
-        json_matches = re.findall(json_pattern, texte)
-        for match in json_matches:
+        response = requests.post(
+            scraper_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "api_key": "ba0c2dad52b3ec",
+                "Accept": "application/json",
+            },
+            timeout=60
+        )
+
+        log(f"Statut: {response.status_code}")
+
+        if response.status_code == 200:
             try:
-                p = int(match)
-                if 500 < p < 200000:
-                    prix_list.append(p)
-            except:
-                pass
-
-        # Deduplique
-        prix_list = list(set(prix_list))
-        log(f"LeBonCoin via ScraperAPI: {len(prix_list)} prix trouves pour {recherche.get('nom')}")
-        return prix_list
+                data = response.json()
+                annonces = data.get("ads", [])
+                prix_list = []
+                for annonce in annonces:
+                    prix = annonce.get("price", [])
+                    if prix and isinstance(prix, list) and len(prix) > 0:
+                        p = prix[0]
+                        if isinstance(p, (int, float)) and 500 < p < 200000:
+                            prix_list.append(int(p))
+                log(f"Succes: {len(annonces)} annonces, {len(prix_list)} prix pour {recherche.get('nom')}")
+                return prix_list
+            except Exception as e:
+                log(f"Erreur parsing JSON: {e}")
+                log(f"Reponse brute: {response.text[:200]}")
+                return []
+        else:
+            log(f"Erreur {response.status_code}: {response.text[:200]}")
+            return []
 
     except Exception as e:
         log(f"Erreur scraping: {e}")
@@ -161,7 +158,7 @@ def boucle_principale():
     log(f"Intervalle: toutes les {interval_heures} heures")
     sb = get_supabase()
     log("Connexion Supabase OK")
-    scraper_key = get_scraper_api_key()
+    scraper_key = get_scraper_key()
     log("Cle ScraperAPI OK")
     cycle = 0
     while True:
